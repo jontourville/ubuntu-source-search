@@ -9,6 +9,7 @@ import urllib.request
 import gzip
 import tarfile
 import tqdm
+import hashlib
 
 def get_args():
     mirror = "http://archive.ubuntu.com/ubuntu"
@@ -22,7 +23,7 @@ def get_args():
     args.mirror = args.mirror.removesuffix("/")
     return args
 
-SourceArchive = collections.namedtuple("SourceArchive", ["url", "size", "package"])
+SourceArchive = collections.namedtuple("SourceArchive", ["url", "filename", "size", "md5", "package"])
 
 def size_to_str(size):
     if size < 1024:
@@ -64,13 +65,14 @@ def get_archive_list(mirror, release, repo):
         if not is_file_line:
             continue
 
-        filename = line.split()[2]
+        md5 = bytes.fromhex(line.split()[0])
         size = int(line.split()[1])
+        filename = line.split()[2]
         exts = filename.split(".")
 
         if len(exts) > 1 and "tar" in exts and (exts[-1] == "tar" or exts[-2] == "tar"):
             url = "%s/%s/%s" % (mirror, directory, filename)
-            archives.append(SourceArchive(url, size, package))
+            archives.append(SourceArchive(url, filename, size, md5, package))
 
     return archives
 
@@ -79,6 +81,25 @@ def mkdir(d):
         os.mkdir(d)
     except FileExistsError:
         pass
+
+def is_out_of_date(archive_path, md5):
+    try:
+        with open(archive_path, "rb") as f:
+            local_md5 = hashlib.md5(f.read()).digest()
+            if local_md5 == md5:
+                return False
+    except:
+        return True
+
+    return True
+
+def get_outdated_archives(archives, out_dir):
+    outdated_archives = []
+    for archive in archives:
+        if is_out_of_date(os.path.join(out_dir, archive.filename), archive.md5):
+            outdated_archives.append(archive)
+
+    return outdated_archives
 
 def download_archives(archives, out_dir, no_extract):
     mkdir(out_dir)
@@ -90,9 +111,9 @@ def download_archives(archives, out_dir, no_extract):
     pbar = tqdm.tqdm(total=total_size, unit="B", unit_scale=True, unit_divisor=1024, dynamic_ncols=True, disable=None)
     for archive in archives:
         filename = archive.url.split("/")[-1]
-        tqdm.tqdm.write("     %s..." % (filename))
-
         archive_path = os.path.join(out_dir, filename)
+
+        tqdm.tqdm.write("     %s..." % (filename))
         with open(archive_path, "wb") as f:
             f.write(urllib.request.urlopen(archive.url).read())
 
@@ -102,18 +123,20 @@ def download_archives(archives, out_dir, no_extract):
             with tarfile.open(archive_path, "r") as t:
                 t.extractall(extract_dir)
 
-            os.remove(archive_path)
-
         pbar.update(archive.size)
 
     pbar.close()
 
 def prompt_to_continue(archives):
+    if len(archives) == 0:
+        print("All archives are up-to-date")
+        return False
+
     total_size = 0
     for archive in archives:
         total_size += archive.size
 
-    print("%d packages (%s) to download" % (len(archives), size_to_str(total_size)))
+    print("%d archives (%s) to download" % (len(archives), size_to_str(total_size)))
     resp = input("Do you want to continue? [y/N] ")
     if resp.lower() in ["y", "yes"]:
         return True
@@ -128,7 +151,8 @@ if __name__ == "__main__":
     args = get_args()
 
     archives = get_archive_list(args.mirror, args.RELEASE, args.REPOSITORY)
-    if prompt_to_continue(archives):
-        download_archives(archives, args.OUT_DIR, args.no_extract)
+    outdated_archives = get_outdated_archives(archives, args.OUT_DIR)
+    if prompt_to_continue(outdated_archives):
+        download_archives(outdated_archives, args.OUT_DIR, args.no_extract)
     else:
         cancel()
